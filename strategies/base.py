@@ -104,3 +104,51 @@ class Strategy(ABC):
                 return False
         
         return True
+    
+    def check_exit_signal(self, data, position):
+        """
+        Проверка сигнала на выход из позиции.
+        Базовая реализация проверки на выход, может быть переопределена в дочерних классах.
+        
+        Args:
+            data (pd.DataFrame): DataFrame с OHLCV данными и индикаторами
+            position (dict): Информация о текущей позиции
+            
+        Returns:
+            dict or None: Сигнал на выход или None, если сигнала нет
+        """
+        if len(data) < 2:
+            return None
+        
+        current = data.iloc[-1]
+        previous = data.iloc[-2]
+        position_type = position['type']
+        
+        # Быстрый выход при развороте тренда
+        if position_type == 'buy' and current['close'] < previous['close'] * 0.995:  # 0.5% движение против позиции
+            return {
+                'type': 'exit',
+                'price': current['close'],
+                'time': current.name,
+                'reason': "Краткосрочный разворот против лонг-позиции"
+            }
+        elif position_type == 'sell' and current['close'] > previous['close'] * 1.005:  # 0.5% движение против позиции
+            return {
+                'type': 'exit',
+                'price': current['close'],
+                'time': current.name,
+                'reason': "Краткосрочный разворот против шорт-позиции"
+            }
+        
+        # Проверка времени в позиции - закрываем если прошло более 1 дня (24 часа)
+        if hasattr(current.name, 'to_pydatetime') and hasattr(position['open_time'], 'to_pydatetime'):
+            position_duration = (current.name.to_pydatetime() - position['open_time'].to_pydatetime()).total_seconds() / 3600  # в часах
+            if position_duration > 24:  # Прошло более 24 часов
+                return {
+                    'type': 'exit',
+                    'price': current['close'],
+                    'time': current.name,
+                    'reason': f"Тайм-аут позиции: {position_duration:.1f} часов (>24ч)"
+                }
+        
+        return None
