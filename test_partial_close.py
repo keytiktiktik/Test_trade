@@ -6,7 +6,22 @@ import os
 import sys
 import logging
 from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
+from multiprocessing import Pool, cpu_count
+import matplotlib.pyplot as plt # type: ignore
+
+def run_backtest_with_params(params):
+    # Распаковка параметров
+    profit_target, close_percent, move_to_breakeven = params
+    # Запуск бэктеста и возврат результатов
+    return run_test_with_partial_close(profit_target, close_percent, move_to_breakeven)
+
+param_combinations = [
+    (0.99, 0, False),      # Стандартный
+    (0.1, 0.5, True),      # 10% прибыль, 50% закрытие
+    (0.05, 0.5, True),     # 5% прибыль, 50% закрытие
+    (0.1, 0.75, True),     # 10% прибыль, 75% закрытие
+]
+
 
 # Добавление текущей директории в путь для импортов
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -239,8 +254,7 @@ def run_comparison_tests():
     return compare_results
 
 if __name__ == "__main__":
-    # Запуск отдельного теста с частичным закрытием позиций
-    # run_test_with_partial_close(partial_profit_target=0.1, partial_close_percent=0.5, move_stop_to_breakeven=True)
-    
-    # Запуск сравнительных тестов
+    with Pool(processes=min(len(param_combinations), cpu_count())) as pool:
+        results = pool.map(run_backtest_with_params, param_combinations)
+        
     run_comparison_tests()

@@ -21,6 +21,7 @@ TRADING_CONFIG = {
 }
 
 # Настройки для бэктестинга
+# В config/settings.py - обновите BACKTEST_CONFIG
 BACKTEST_CONFIG = {
     'start_date': (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'),  # Последние 30 дней
     'end_date': datetime.now().strftime('%Y-%m-%d'),
@@ -29,9 +30,9 @@ BACKTEST_CONFIG = {
     'max_position_hold_time': 48,  # Максимальное время удержания позиции в часах (2 дня)
     
     # Настройки частичного закрытия позиций
-    'partial_profit_target': 0.1,  # 10% прибыль для частичного закрытия
-    'partial_close_percent': 0.5,  # Закрытие 50% позиции
-    'move_stop_to_breakeven': True,  # Перенос стопа в безубыток после частичного закрытия
+    'partial_profit_target': 0.05,  # 5% прибыль для частичного закрытия
+    'partial_close_percent': 0.5,   # Закрытие 50% позиции
+    'move_stop_to_breakeven': True, # Перенос стопа в безубыток после частичного закрытия
 }
 
 # Настройки риск-менеджмента
@@ -83,7 +84,7 @@ BREAKOUT_STRATEGY_CONFIG = {
 # Параметры гибридной стратегии
 HYBRID_STRATEGY_CONFIG = {
     'name': 'Momentum-MeanReversion',
-    'enabled': True,
+    'enabled': False,
     'timeframes': {
         'analysis': '1h',          # Таймфрейм для анализа (уменьшен)
         'entry': '15m',            # Таймфрейм для входа (уменьшен)
@@ -101,9 +102,9 @@ HYBRID_STRATEGY_CONFIG = {
 
 # Веса для комбинирования стратегий
 STRATEGY_WEIGHTS = {
-    'Trend Following Strategy': 0.3,
-    'Level Breakout Strategy': 0.3,
-    'Momentum-MeanReversion': 0.4
+    'Trend Following Strategy': 0.5,
+    'Level Breakout Strategy': 0.5,
+    'Momentum-MeanReversion': 0
 }
 
 # Пороги для генерации сигналов

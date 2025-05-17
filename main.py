@@ -8,7 +8,7 @@ import logging
 import argparse
 import json
 from datetime import datetime
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt # type: ignore
 import sys
 
 # Добавление текущей директории в путь для импортов

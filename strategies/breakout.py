@@ -7,7 +7,7 @@ import numpy as np
 import sys
 import os
 import logging
-
+from indicators import technical
 # Добавляем корневую директорию проекта в путь
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

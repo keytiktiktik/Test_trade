@@ -1,3 +1,4 @@
+# backtest_engine_fixed.py
 """
 Модуль для бэктестинга торговых стратегий.
 Позволяет тестировать стратегии на исторических данных и оценивать их эффективность.
@@ -42,7 +43,7 @@ class BacktestEngine:
         self.end_date = config.get('end_date')
         
         # Параметры управления позицией
-        self.partial_profit_target = config.get('partial_profit_target', 0.1)  # 10% прибыль для частичного закрытия
+        self.partial_profit_target = config.get('partial_profit_target', 0.2)  # 10% прибыль для частичного закрытия
         self.partial_close_percent = config.get('partial_close_percent', 0.5)  # Закрытие 50% позиции
         self.move_stop_to_breakeven = config.get('move_stop_to_breakeven', True)  # Перенос стопа в безубыток
         
@@ -54,6 +55,100 @@ class BacktestEngine:
         self.partial_closes = {}  # Для хранения информации о частичных закрытиях
         
         logger.info(f"Инициализирован движок бэктестинга с балансом {self.initial_balance} USD")
+        logger.info(f"Параметры частичного закрытия: порог={self.partial_profit_target*100}%, "
+                  f"размер закрытия={self.partial_close_percent*100}%, "
+                  f"перенос в безубыток={self.move_stop_to_breakeven}")
+    
+    def _process_open_positions(self, current_time, current_data, strategies, symbol):
+        """
+        Обработка открытых позиций.
+        
+        Args:
+            current_time (datetime): Текущее время
+            current_data (dict): Данные для всех таймфреймов
+            strategies (list): Список стратегий
+            symbol (str): Символ торговой пары
+        """
+        # Если нет открытых позиций, ничего не делаем
+        if not self.open_positions:
+            return
+        
+        # Получение текущей цены
+        base_tf = min(current_data.keys(), key=lambda x: self._get_timeframe_minutes(x))
+        current_price = current_data[base_tf].iloc[-1]['close']
+        
+        # Проверка всех открытых позиций
+        for position_id, position in list(self.open_positions.items()):
+            # Расчет текущей прибыли/убытка в процентах С УЧЕТОМ ПЛЕЧА
+            entry_price = position['entry_price']
+            position_type = position['type']
+            leverage = position['leverage']
+            
+            # Расчет изменения цены с учетом плеча
+            if position_type == 'buy':
+                # Правильный расчет для длинных позиций
+                price_change_percent = ((current_price - entry_price) / entry_price) * leverage * 100
+            else:  # sell
+                # Правильный расчет для коротких позиций
+                price_change_percent = ((entry_price - current_price) / entry_price) * leverage * 100
+            
+            # Логирование для отладки
+            logger.debug(f"Позиция {position_id}: {position_type}, текущая цена={current_price}, цена входа={entry_price}, "
+                        f"плечо={leverage}x, изменение PnL={price_change_percent:.2f}%, "
+                        f"порог={self.partial_profit_target*100:.1f}%, "
+                        f"partial_done={position.get('partial_close_done', False)}")
+            
+            # Проверка на частичное закрытие позиции
+            if not position.get('partial_close_done', False) and price_change_percent >= self.partial_profit_target * 100:
+                logger.info(f"Частичное закрытие позиции {position_id}: PnL={price_change_percent:.2f}% >= "
+                        f"порог={self.partial_profit_target*100:.1f}%")
+                
+                # Вычисление размера для частичного закрытия
+                close_quantity = position['quantity'] * self.partial_close_percent
+                
+                # Частичное закрытие позиции
+                self._partial_close_position(position_id, close_quantity, current_price, current_time, 
+                                        f"Partial Take Profit {self.partial_profit_target*100:.0f}%")
+                
+                # Обновление флага частичного закрытия
+                position['partial_close_done'] = True
+                
+                # Перемещение стопа в безубыток, если это настроено
+                if self.move_stop_to_breakeven and not position.get('breakeven_done', False):
+                    position['stop_loss'] = position['entry_price']
+                    position['breakeven_done'] = True
+                    logger.info(f"Стоп-лосс для позиции {position_id} перемещен в безубыток ({position['entry_price']})")
+            # Поиск соответствующей стратегии по имени в причине позиции
+            strategy_name = position['reason'].split(':')[0] if ':' in position['reason'] else None
+            strategy = next((s for s in strategies if s.name == strategy_name), None)
+            
+            # Проверка на стоп-лосс и тейк-профит
+            if position['stop_loss'] is not None:
+                if (position['type'] == 'buy' and current_price <= position['stop_loss']) or \
+                   (position['type'] == 'sell' and current_price >= position['stop_loss']):
+                    self._close_position(position_id, current_price, current_time, "Stop Loss")
+                    continue
+            
+            if position['take_profit'] is not None:
+                if (position['type'] == 'buy' and current_price >= position['take_profit']) or \
+                   (position['type'] == 'sell' and current_price <= position['take_profit']):
+                    self._close_position(position_id, current_price, current_time, "Take Profit")
+                    continue
+            
+            # Проверка сигнала на выход от стратегии (если есть стратегия)
+            if strategy:
+                # Получение основного таймфрейма стратегии
+                main_tf = strategy.timeframes.get('entry', base_tf)
+                
+                if main_tf in current_data:
+                    data_with_indicators = strategy.calculate_indicators(current_data[main_tf])
+                    
+                    # Проверка сигнала на выход
+                    if hasattr(strategy, 'check_exit_signal'):
+                        exit_signal = strategy.check_exit_signal(data_with_indicators, position)
+                        
+                        if exit_signal:
+                            self._close_position(position_id, current_price, current_time, exit_signal.get('reason', 'Strategy exit signal'))
     
     def run_backtest(self, strategies, symbol, timeframes):
         """
@@ -286,87 +381,6 @@ class BacktestEngine:
         self.open_positions[position_id] = position
         
         logger.info(f"Открыта позиция {position_id}: {signal_dict['type']} {position_params['quantity']} {symbol} по цене {current_price} с плечом {position_params['leverage']}x")
-    
-    def _process_open_positions(self, current_time, current_data, strategies, symbol):
-        """
-        Обработка открытых позиций.
-        
-        Args:
-            current_time (datetime): Текущее время
-            current_data (dict): Данные для всех таймфреймов
-            strategies (list): Список стратегий
-            symbol (str): Символ торговой пары
-        """
-        # Если нет открытых позиций, ничего не делаем
-        if not self.open_positions:
-            return
-        
-        # Получение текущей цены
-        base_tf = min(current_data.keys(), key=lambda x: self._get_timeframe_minutes(x))
-        current_price = current_data[base_tf].iloc[-1]['close']
-        
-        # Проверка всех открытых позиций
-        for position_id, position in list(self.open_positions.items()):
-            # Поиск соответствующей стратегии по имени в причине позиции
-            strategy_name = position['reason'].split(':')[0] if ':' in position['reason'] else None
-            strategy = next((s for s in strategies if s.name == strategy_name), None)
-            
-            # Расчет текущей прибыли/убытка в процентах
-            entry_price = position['entry_price']
-            position_type = position['type']
-            
-            if position_type == 'buy':
-                price_change_percent = (current_price - entry_price) / entry_price * 100
-            else:  # sell
-                price_change_percent = (entry_price - current_price) / entry_price * 100
-                
-            # Проверка на частичное закрытие позиции по достижении частичной прибыли
-            if (not position.get('partial_close_done', False) and 
-                price_change_percent >= self.partial_profit_target * 100):
-                
-                # Вычисление размера для частичного закрытия
-                close_quantity = position['quantity'] * self.partial_close_percent
-                
-                # Частичное закрытие позиции
-                self._partial_close_position(position_id, close_quantity, current_price, current_time, 
-                                           f"Partial Take Profit {self.partial_profit_target*100:.0f}%")
-                
-                # Обновление флага частичного закрытия
-                position['partial_close_done'] = True
-                
-                # Перемещение стопа в безубыток, если это настроено
-                if self.move_stop_to_breakeven and not position.get('breakeven_done', False):
-                    position['stop_loss'] = position['entry_price']
-                    position['breakeven_done'] = True
-                    logger.info(f"Стоп-лосс для позиции {position_id} перемещен в безубыток ({position['entry_price']})")
-            
-            # Проверка на стоп-лосс и тейк-профит
-            if position['stop_loss'] is not None:
-                if (position['type'] == 'buy' and current_price <= position['stop_loss']) or \
-                   (position['type'] == 'sell' and current_price >= position['stop_loss']):
-                    self._close_position(position_id, current_price, current_time, "Stop Loss")
-                    continue
-            
-            if position['take_profit'] is not None:
-                if (position['type'] == 'buy' and current_price >= position['take_profit']) or \
-                   (position['type'] == 'sell' and current_price <= position['take_profit']):
-                    self._close_position(position_id, current_price, current_time, "Take Profit")
-                    continue
-            
-            # Проверка сигнала на выход от стратегии (если есть стратегия)
-            if strategy:
-                # Получение основного таймфрейма стратегии
-                main_tf = strategy.timeframes.get('entry', base_tf)
-                
-                if main_tf in current_data:
-                    data_with_indicators = strategy.calculate_indicators(current_data[main_tf])
-                    
-                    # Проверка сигнала на выход
-                    if hasattr(strategy, 'check_exit_signal'):
-                        exit_signal = strategy.check_exit_signal(data_with_indicators, position)
-                        
-                        if exit_signal:
-                            self._close_position(position_id, current_price, current_time, exit_signal.get('reason', 'Strategy exit signal'))
     
     def _partial_close_position(self, position_id, close_quantity, close_price, close_time, reason):
         """

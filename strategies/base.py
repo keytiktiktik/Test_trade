@@ -6,6 +6,8 @@
 from abc import ABC, abstractmethod
 import pandas as pd
 import logging
+from indicators import technical
+
 
 logger = logging.getLogger('strategy')
 
