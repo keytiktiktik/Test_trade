@@ -161,19 +161,41 @@ class Visualizer:
                     for i, line in enumerate(data):
                         ax1.plot(line.index, line.values, label=f"{name}_{i}")
         
-        # Добавление точек входа и выхода
-        for trade in trades:
+        # Сначала отображаем частичные закрытия
+        partial_trades = [t for t in trades if t.get('partial_close', False)]
+        full_trades = [t for t in trades if not t.get('partial_close', False)]
+        
+        # Добавление точек частичного закрытия
+        for trade in partial_trades:
             # Точка входа (зеленый треугольник вверх для покупки, красный треугольник вниз для продажи)
             if trade['type'] == 'buy':
                 ax1.scatter(trade['open_time'], trade['entry_price'], 
-                           marker='^', color='green', s=100, zorder=5)
+                          marker='^', color='green', s=100, zorder=5, alpha=0.7)
             else:  # sell
                 ax1.scatter(trade['open_time'], trade['entry_price'], 
-                           marker='v', color='red', s=100, zorder=5)
+                          marker='v', color='red', s=100, zorder=5, alpha=0.7)
+            
+            # Точка частичного закрытия (ромб)
+            ax1.scatter(trade['close_time'], trade['exit_price'], 
+                      marker='D', color='orange', s=100, zorder=5, edgecolors='black')
+        
+        # Добавление точек входа и выхода для основных сделок
+        for trade in full_trades:
+            # Точка входа (зеленый треугольник вверх для покупки, красный треугольник вниз для продажи)
+            if trade['type'] == 'buy':
+                ax1.scatter(trade['open_time'], trade['entry_price'], 
+                          marker='^', color='green', s=100, zorder=5)
+            else:  # sell
+                ax1.scatter(trade['open_time'], trade['entry_price'], 
+                          marker='v', color='red', s=100, zorder=5)
             
             # Точка выхода (крестик)
             ax1.scatter(trade['close_time'], trade['exit_price'], 
-                       marker='x', color='black', s=100, zorder=5)
+                      marker='x', color='black', s=100, zorder=5)
+            
+            # Добавление точек перевода стопа в безубыток, если есть
+            if trade.get('breakeven_time'):
+                ax1.axhline(y=trade['entry_price'], xmin=trade['breakeven_time'], linestyle='--', color='blue', alpha=0.5)
         
         # Построение графика объема
         ax2.bar(price_data.index, price_data.volume, width, color='blue', alpha=0.5)
@@ -187,8 +209,15 @@ class Visualizer:
         ax2.set_ylabel('Volume')
         ax2.grid(True, alpha=0.3)
         
-        if indicators:
-            ax1.legend()
+        # Добавление легенды
+        from matplotlib.lines import Line2D
+        custom_lines = [
+            Line2D([0], [0], marker='^', color='w', markerfacecolor='green', markersize=10, label='Buy Entry'),
+            Line2D([0], [0], marker='v', color='w', markerfacecolor='red', markersize=10, label='Sell Entry'),
+            Line2D([0], [0], marker='D', color='w', markerfacecolor='orange', markersize=10, markeredgecolor='black', label='Partial Close'),
+            Line2D([0], [0], marker='x', color='black', markersize=10, label='Position Close')
+        ]
+        ax1.legend(handles=custom_lines, loc='upper left')
         
         # Форматирование оси X для отображения дат
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
@@ -217,6 +246,10 @@ class Visualizer:
         stats = backtest_results['stats']
         trades = backtest_results['trades']
         
+        # Выделяем частичные закрытия
+        partial_trades = [t for t in trades if t.get('partial_close', False)]
+        full_trades = [t for t in trades if not t.get('partial_close', False)]
+        
         # Общая статистика
         overall_stats = [
             ['Initial Balance', f"${backtest_results['initial_balance']:.2f}"],
@@ -224,6 +257,8 @@ class Visualizer:
             ['Profit/Loss', f"${backtest_results['final_balance'] - backtest_results['initial_balance']:.2f}"],
             ['Profit %', f"{backtest_results['profit_percent']:.2f}%"],
             ['Total Trades', f"{stats['total_trades']}"],
+            ['Full Closures', f"{len(full_trades)}"],
+            ['Partial Closures', f"{len(partial_trades)}"],
             ['Win Rate', f"{stats['win_rate']:.2f}%"],
             ['Profit Factor', f"{stats['profit_factor']:.2f}"],
             ['Max Drawdown', f"{stats['max_drawdown_percent']:.2f}%"],
@@ -239,6 +274,7 @@ class Visualizer:
             if strategy not in strategy_stats:
                 strategy_stats[strategy] = {
                     'count': 0,
+                    'partial_count': 0,
                     'wins': 0,
                     'losses': 0,
                     'profit': 0,
@@ -246,6 +282,9 @@ class Visualizer:
                 }
             
             strategy_stats[strategy]['count'] += 1
+            
+            if trade.get('partial_close', False):
+                strategy_stats[strategy]['partial_count'] += 1
             
             if trade['net_pnl'] > 0:
                 strategy_stats[strategy]['wins'] += 1
@@ -284,7 +323,7 @@ class Visualizer:
             
             strategy_table_data.append([
                 strategy,
-                f"{stats['count']}",
+                f"{stats['count']} ({stats['partial_count']}P)",
                 f"{win_rate:.2f}%",
                 f"${stats['profit'] - stats['loss']:.2f}",
                 f"{profit_factor:.2f}"
@@ -292,10 +331,10 @@ class Visualizer:
         
         table2 = ax2.table(
             cellText=strategy_table_data,
-            colLabels=['Strategy', 'Trades', 'Win Rate', 'Net Profit', 'Profit Factor'],
+            colLabels=['Strategy', 'Trades (Partial)', 'Win Rate', 'Net Profit', 'Profit Factor'],
             loc='center',
             cellLoc='center',
-            colWidths=[0.3, 0.15, 0.15, 0.2, 0.2]
+            colWidths=[0.3, 0.2, 0.15, 0.18, 0.17]
         )
         
         table2.auto_set_font_size(False)

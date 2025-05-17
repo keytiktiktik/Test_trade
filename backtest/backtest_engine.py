@@ -41,11 +41,17 @@ class BacktestEngine:
         self.start_date = config.get('start_date')
         self.end_date = config.get('end_date')
         
+        # Параметры управления позицией
+        self.partial_profit_target = config.get('partial_profit_target', 0.1)  # 10% прибыль для частичного закрытия
+        self.partial_close_percent = config.get('partial_close_percent', 0.5)  # Закрытие 50% позиции
+        self.move_stop_to_breakeven = config.get('move_stop_to_breakeven', True)  # Перенос стопа в безубыток
+        
         # Состояние бэктестинга
         self.current_balance = self.initial_balance
         self.equity_curve = []
         self.trades = []
         self.open_positions = {}
+        self.partial_closes = {}  # Для хранения информации о частичных закрытиях
         
         logger.info(f"Инициализирован движок бэктестинга с балансом {self.initial_balance} USD")
     
@@ -88,6 +94,7 @@ class BacktestEngine:
         self.equity_curve = []
         self.trades = []
         self.open_positions = {}
+        self.partial_closes = {}
         
         # Добавление начальной точки в equity curve
         self.equity_curve.append({
@@ -258,12 +265,15 @@ class BacktestEngine:
             'type': signal_dict['type'],  # 'buy' или 'sell'
             'entry_price': current_price,
             'quantity': position_params['quantity'],
+            'initial_quantity': position_params['quantity'],  # Сохраняем исходное количество
             'leverage': position_params['leverage'],
             'stop_loss': position_params['stop_loss'],
             'take_profit': position_params['take_profit'],
             'open_time': current_time,
             'margin': position_params['position_size_usd'] / position_params['leverage'],
-            'reason': signal_reason
+            'reason': signal_reason,
+            'partial_close_done': False,  # Флаг частичного закрытия
+            'breakeven_done': False,  # Флаг перевода в безубыток
         }
         
         # Расчет комиссии
@@ -301,6 +311,35 @@ class BacktestEngine:
             strategy_name = position['reason'].split(':')[0] if ':' in position['reason'] else None
             strategy = next((s for s in strategies if s.name == strategy_name), None)
             
+            # Расчет текущей прибыли/убытка в процентах
+            entry_price = position['entry_price']
+            position_type = position['type']
+            
+            if position_type == 'buy':
+                price_change_percent = (current_price - entry_price) / entry_price * 100
+            else:  # sell
+                price_change_percent = (entry_price - current_price) / entry_price * 100
+                
+            # Проверка на частичное закрытие позиции по достижении частичной прибыли
+            if (not position.get('partial_close_done', False) and 
+                price_change_percent >= self.partial_profit_target * 100):
+                
+                # Вычисление размера для частичного закрытия
+                close_quantity = position['quantity'] * self.partial_close_percent
+                
+                # Частичное закрытие позиции
+                self._partial_close_position(position_id, close_quantity, current_price, current_time, 
+                                           f"Partial Take Profit {self.partial_profit_target*100:.0f}%")
+                
+                # Обновление флага частичного закрытия
+                position['partial_close_done'] = True
+                
+                # Перемещение стопа в безубыток, если это настроено
+                if self.move_stop_to_breakeven and not position.get('breakeven_done', False):
+                    position['stop_loss'] = position['entry_price']
+                    position['breakeven_done'] = True
+                    logger.info(f"Стоп-лосс для позиции {position_id} перемещен в безубыток ({position['entry_price']})")
+            
             # Проверка на стоп-лосс и тейк-профит
             if position['stop_loss'] is not None:
                 if (position['type'] == 'buy' and current_price <= position['stop_loss']) or \
@@ -323,12 +362,85 @@ class BacktestEngine:
                     data_with_indicators = strategy.calculate_indicators(current_data[main_tf])
                     
                     # Проверка сигнала на выход
-                    # Этот метод должен быть реализован в стратегии, если нужно особое условие выхода
                     if hasattr(strategy, 'check_exit_signal'):
                         exit_signal = strategy.check_exit_signal(data_with_indicators, position)
                         
                         if exit_signal:
                             self._close_position(position_id, current_price, current_time, exit_signal.get('reason', 'Strategy exit signal'))
+    
+    def _partial_close_position(self, position_id, close_quantity, close_price, close_time, reason):
+        """
+        Частичное закрытие позиции.
+        
+        Args:
+            position_id (str): Идентификатор позиции
+            close_quantity (float): Количество для закрытия
+            close_price (float): Цена закрытия
+            close_time (datetime): Время закрытия
+            reason (str): Причина закрытия
+        """
+        if position_id not in self.open_positions:
+            return
+        
+        position = self.open_positions[position_id]
+        
+        # Проверка, что частичное закрытие возможно
+        if close_quantity >= position['quantity']:
+            # Если закрываем всю позицию, используем обычное закрытие
+            self._close_position(position_id, close_price, close_time, reason)
+            return
+        
+        # Расчет PnL для закрываемой части
+        entry_price = position['entry_price']
+        leverage = position['leverage']
+        position_type = position['type']
+        
+        if position_type == 'buy':
+            pnl = (close_price - entry_price) * close_quantity * leverage
+        else:  # sell
+            pnl = (entry_price - close_price) * close_quantity * leverage
+        
+        # Расчет комиссии для закрываемой части
+        position_value = close_price * close_quantity * leverage
+        fee = position_value * self.fee_rate
+        
+        # Обновление баланса
+        self.current_balance += pnl - fee
+        
+        # Запись информации о частичном закрытии
+        partial_close = {
+            'position_id': position_id,
+            'symbol': position['symbol'],
+            'type': position_type,
+            'strategy': position['reason'].split(':')[0] if ':' in position['reason'] else 'Unknown',
+            'entry_price': entry_price,
+            'exit_price': close_price,
+            'quantity': close_quantity,
+            'leverage': leverage,
+            'open_time': position['open_time'],
+            'close_time': close_time,
+            'duration': (close_time - position['open_time']).total_seconds() / 60,  # в минутах
+            'pnl': pnl,
+            'fee': fee,
+            'net_pnl': pnl - fee,
+            'pnl_percent': pnl / (position['margin'] * (close_quantity / position['initial_quantity'])) * 100,
+            'reason': reason,
+            'entry_reason': position['reason'],
+            'partial_close': True
+        }
+        
+        # Добавление в историю сделок
+        self.trades.append(partial_close)
+        
+        # Сохранение инфо о частичном закрытии
+        if position_id not in self.partial_closes:
+            self.partial_closes[position_id] = []
+        self.partial_closes[position_id].append(partial_close)
+        
+        # Обновление количества в открытой позиции
+        position['quantity'] -= close_quantity
+        
+        logger.info(f"Частично закрыта позиция {position_id}: {close_quantity} из {position['initial_quantity']} {position['symbol']}, PnL = {pnl:.2f} USD ({partial_close['pnl_percent']:.2f}%), причина: {reason}")
     
     def _close_position(self, position_id, close_price, close_time, reason):
         """
@@ -372,6 +484,7 @@ class BacktestEngine:
             'entry_price': entry_price,
             'exit_price': close_price,
             'quantity': quantity,
+            'initial_quantity': position.get('initial_quantity', quantity),  # Учитываем возможные частичные закрытия
             'leverage': leverage,
             'open_time': position['open_time'],
             'close_time': close_time,
@@ -379,9 +492,10 @@ class BacktestEngine:
             'pnl': pnl,
             'fee': fee,
             'net_pnl': pnl - fee,
-            'pnl_percent': pnl / (position['margin']) * 100,  # % от начального капитала
+            'pnl_percent': pnl / (position['margin'] * (quantity / position['initial_quantity'])) * 100,
             'reason': reason,
-            'entry_reason': position['reason']
+            'entry_reason': position['reason'],
+            'partial_closes': self.partial_closes.get(position_id, [])
         }
         
         self.trades.append(trade)
@@ -490,6 +604,9 @@ class BacktestEngine:
         
         sortino_ratio = (avg_return / downside_std) * np.sqrt(252) if downside_std > 0 else 0
         
+        # Расчет метрик для частичных закрытий
+        partial_close_count = sum(1 for t in self.trades if t.get('partial_close', False))
+        
         return {
             'total_trades': total_trades,
             'winning_trades': len(winning_trades),
@@ -505,7 +622,8 @@ class BacktestEngine:
             'avg_trade': avg_trade,
             'avg_bars': avg_bars,
             'max_win': max_win,
-            'max_loss': max_loss
+            'max_loss': max_loss,
+            'partial_close_count': partial_close_count
         }
     
     def _get_timeframe_minutes(self, timeframe):
